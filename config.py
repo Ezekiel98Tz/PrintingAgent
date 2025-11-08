@@ -32,11 +32,22 @@ class Config:
             directory.mkdir(parents=True, exist_ok=True)
         
         # AI/LLM Configuration
-        self.llm_provider: str = os.getenv("LLM_PROVIDER", "openai")  # openai, anthropic, mock
+        self.llm_provider: str = os.getenv("LLM_PROVIDER", "openai")  # openai, anthropic, openrouter, deepseek, groq, mock
         self.openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
         self.anthropic_api_key: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
         self.openai_model: str = os.getenv("OPENAI_MODEL", "gpt-3.5-turbo")
-        self.model_name: str = os.getenv("MODEL_NAME", "gpt-3.5-turbo")  # Keep for backward compatibility
+        self.anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-3-sonnet-20240229")
+        # Generic model name for OpenAI-compatible providers (OpenRouter, DeepSeek, Groq)
+        self.model_name: str = os.getenv("MODEL_NAME", "openai/gpt-4o-mini")
+        # OpenRouter (broad model catalog including Gemini, Claude, Llama, etc.)
+        self.openrouter_api_key: Optional[str] = os.getenv("OPENROUTER_API_KEY")
+        self.openrouter_base_url: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        # DeepSeek (OpenAI-compatible API)
+        self.deepseek_api_key: Optional[str] = os.getenv("DEEPSEEK_API_KEY")
+        self.deepseek_base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        # Groq (OpenAI-compatible API)
+        self.groq_api_key: Optional[str] = os.getenv("GROQ_API_KEY")
+        self.groq_base_url: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
         self.max_tokens: int = int(os.getenv("MAX_TOKENS", "2000"))
         self.temperature: float = float(os.getenv("TEMPERATURE", "0.3"))
         
@@ -77,13 +88,19 @@ class Config:
     def _validate_config(self):
         """Validate essential configuration parameters"""
         errors = []
-        
+
         # Only require API keys if not using mock mode
         if self.llm_provider != "mock":
             if self.llm_provider == "openai" and not self.openai_api_key:
                 errors.append("OPENAI_API_KEY must be set when using OpenAI provider")
             elif self.llm_provider == "anthropic" and not self.anthropic_api_key:
                 errors.append("ANTHROPIC_API_KEY must be set when using Anthropic provider")
+            elif self.llm_provider == "openrouter" and not self.openrouter_api_key:
+                errors.append("OPENROUTER_API_KEY must be set when using OpenRouter provider")
+            elif self.llm_provider == "deepseek" and not self.deepseek_api_key:
+                errors.append("DEEPSEEK_API_KEY must be set when using DeepSeek provider")
+            elif self.llm_provider == "groq" and not self.groq_api_key:
+                errors.append("GROQ_API_KEY must be set when using Groq provider")
         
         # Twilio is optional for local testing
         # if not self.twilio_account_sid or not self.twilio_auth_token:

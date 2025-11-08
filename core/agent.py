@@ -14,9 +14,12 @@ try:
     from langchain.prompts import PromptTemplate
 except ImportError:
     # Fallback for different langchain versions
-    pass
+    HumanMessage = None
+    SystemMessage = None
 
 from config import Config
+from openai import OpenAI as OpenAIClient
+import anthropic as anthropic_sdk
 import json
 import time
 
@@ -77,6 +80,86 @@ class MockLLM:
         
         return improved
 
+class OpenAICompatibleLLM:
+    """Wrapper for OpenAI-compatible chat APIs (OpenRouter, DeepSeek, Groq)."""
+
+    def __init__(self, api_key: str, base_url: str, model: str, temperature: float, max_tokens: int):
+        self.client = OpenAIClient(api_key=api_key, base_url=base_url)
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def invoke(self, messages):
+        convo = []
+        # Convert LangChain messages to OpenAI format
+        if isinstance(messages, list):
+            for m in messages:
+                content = getattr(m, 'content', None) or str(m)
+                role = 'user'
+                if SystemMessage and isinstance(m, SystemMessage):
+                    role = 'system'
+                elif HumanMessage and isinstance(m, HumanMessage):
+                    role = 'user'
+                convo.append({"role": role, "content": content})
+        else:
+            convo = [{"role": "user", "content": str(messages)}]
+
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=convo,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+        )
+        content = resp.choices[0].message.content if resp.choices and resp.choices[0].message else ""
+
+        class Resp:
+            def __init__(self, content):
+                self.content = content
+
+        return Resp(content)
+
+class AnthropicLLM:
+    """Wrapper for Anthropic Claude via official SDK."""
+
+    def __init__(self, api_key: str, model: str, temperature: float, max_tokens: int):
+        self.client = anthropic_sdk.Anthropic(api_key=api_key)
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    def invoke(self, messages):
+        # Extract optional system prompt and user content
+        system_prompt = None
+        user_content = ""
+        if isinstance(messages, list):
+            for m in messages:
+                content = getattr(m, 'content', None) or str(m)
+                if SystemMessage and isinstance(m, SystemMessage):
+                    system_prompt = content
+                else:
+                    user_content += (content + "\n")
+        else:
+            user_content = str(messages)
+
+        msg = self.client.messages.create(
+            model=self.model,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content.strip()}],
+        )
+        # Concatenate text blocks
+        content = ""
+        for block in getattr(msg, 'content', []) or []:
+            if getattr(block, 'type', '') == 'text' and hasattr(block, 'text'):
+                content += block.text
+
+        class Resp:
+            def __init__(self, content):
+                self.content = content
+
+        return Resp(content or str(msg))
+
 class DocumentAgent:
     """AI Agent for processing and improving documents"""
     
@@ -99,6 +182,41 @@ class DocumentAgent:
                     model=self.config.openai_model,
                     temperature=self.config.temperature,
                     max_tokens=self.config.max_tokens
+                )
+            elif self.config.llm_provider == "anthropic" and self.config.anthropic_api_key:
+                logger.info(f"Initializing Anthropic LLM: {self.config.anthropic_model}")
+                return AnthropicLLM(
+                    api_key=self.config.anthropic_api_key,
+                    model=self.config.anthropic_model,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                )
+            elif self.config.llm_provider == "openrouter" and self.config.openrouter_api_key:
+                logger.info(f"Initializing OpenRouter LLM: {self.config.model_name}")
+                return OpenAICompatibleLLM(
+                    api_key=self.config.openrouter_api_key,
+                    base_url=self.config.openrouter_base_url,
+                    model=self.config.model_name,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                )
+            elif self.config.llm_provider == "deepseek" and self.config.deepseek_api_key:
+                logger.info(f"Initializing DeepSeek LLM: {self.config.model_name}")
+                return OpenAICompatibleLLM(
+                    api_key=self.config.deepseek_api_key,
+                    base_url=self.config.deepseek_base_url,
+                    model=self.config.model_name,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
+                )
+            elif self.config.llm_provider == "groq" and self.config.groq_api_key:
+                logger.info(f"Initializing Groq LLM: {self.config.model_name}")
+                return OpenAICompatibleLLM(
+                    api_key=self.config.groq_api_key,
+                    base_url=self.config.groq_base_url,
+                    model=self.config.model_name,
+                    temperature=self.config.temperature,
+                    max_tokens=self.config.max_tokens,
                 )
             else:
                 logger.warning("No supported LLM configuration found")
@@ -184,7 +302,11 @@ class DocumentAgent:
                 "processed_content": result["content"],
                 "changes_summary": result["summary"],
                 "document_type": document_type,
-                "model_used": getattr(self.config, 'openai_model', 'mock') if hasattr(self.config, 'openai_model') else 'mock'
+                "model_used": (
+                    self.config.openai_model if self.config.llm_provider == "openai" else (
+                        self.config.anthropic_model if self.config.llm_provider == "anthropic" else self.config.model_name
+                    )
+                )
             }
             
         except Exception as e:

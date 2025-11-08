@@ -249,8 +249,13 @@ class DocumentHandler:
         except Exception as e:
             return {"success": False, "error": f"RTF extraction failed: {e}"}
     
-    def save_processed_document(self, content: str, original_filename: str, 
-                              output_format: Optional[str] = None) -> Dict[str, Any]:
+    def save_processed_document(
+        self,
+        content: str,
+        original_filename: str,
+        output_format: Optional[str] = None,
+        save_dir: Optional[Union[str, Path]] = None,
+    ) -> Dict[str, Any]:
         """
         Save processed content as a new document
         
@@ -262,23 +267,46 @@ class DocumentHandler:
         Returns:
             Dictionary with save results and file path
         """
-        output_format = output_format or self.config.output_format
+        output_format = (output_format or self.config.output_format).lower()
         
         try:
-            # Generate output filename
+            # Determine output filename and directory
             original_path = Path(original_filename)
-            timestamp = Path().cwd().name  # Simple timestamp alternative
-            output_filename = f"{original_path.stem}_processed.{output_format}"
-            output_path = self.config.processed_dir / output_filename
+            output_dir = Path(save_dir) if save_dir else self.config.processed_dir
+            try:
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
+            # If caller provided a desired filename with matching suffix, honor it
+            suffix = original_path.suffix.lower().lstrip('.')
+            if suffix == output_format:
+                output_filename = original_path.name
+            else:
+                output_filename = f"{original_path.stem}_processed.{output_format}"
+            output_path = output_dir / output_filename
             
             if output_format == "txt":
                 return self._save_as_txt(content, output_path)
             elif output_format == "docx":
-                return self._save_as_docx(content, output_path)
+                # Preserve formatting when requested and original is DOCX
+                if self.config.preserve_formatting and original_path.suffix.lower() == ".docx":
+                    preserve_result = self._save_as_docx_preserve_formatting(original_path, content, output_path)
+                    # Fallback if preservation fails
+                    if not preserve_result.get("success"):
+                        return self._save_as_docx(content, output_path)
+                    return preserve_result
+                else:
+                    return self._save_as_docx(content, output_path)
             elif output_format == "pdf":
                 # For PDF, save as DOCX first then convert if needed
                 docx_path = output_path.with_suffix('.docx')
-                docx_result = self._save_as_docx(content, docx_path)
+                if self.config.preserve_formatting and original_path.suffix.lower() == ".docx":
+                    docx_result = self._save_as_docx_preserve_formatting(original_path, content, docx_path)
+                    if not docx_result.get("success"):
+                        docx_result = self._save_as_docx(content, docx_path)
+                else:
+                    docx_result = self._save_as_docx(content, docx_path)
                 if docx_result["success"]:
                     return {"success": True, "file_path": str(docx_path), "format": "docx"}
                 return docx_result
@@ -308,7 +336,7 @@ class DocumentHandler:
         """Save content as DOCX file"""
         if not Document:
             return {"success": False, "error": "DOCX library not available"}
-        
+
         try:
             doc = Document()
             
@@ -328,6 +356,70 @@ class DocumentHandler:
             }
         except Exception as e:
             return {"success": False, "error": f"Failed to save DOCX: {e}"}
+
+    def _save_as_docx_preserve_formatting(self, original_path: Path, content: str, output_path: Path) -> Dict[str, Any]:
+        """
+        Save content into a DOCX while preserving the original document's paragraph styles
+        and run-level formatting, by editing the original file structure in place.
+
+        Best-effort strategy:
+        - Map content lines to existing paragraphs sequentially.
+        - Distribute characters across existing runs to keep fonts/sizes.
+        - Carry forward the last run's style for overflow text.
+        """
+        if not Document:
+            return {"success": False, "error": "DOCX library not available"}
+        try:
+            doc = Document(str(original_path))
+            lines = content.splitlines()
+
+            def apply_text_to_runs(paragraph, new_text: str):
+                runs = list(paragraph.runs)
+                if not runs:
+                    paragraph.add_run(new_text)
+                    return
+                remaining = new_text
+                for run in runs:
+                    if not remaining:
+                        run.text = ""
+                        continue
+                    orig_len = len(run.text)
+                    chunk_len = min(len(remaining), orig_len if orig_len > 0 else 32)
+                    run.text = remaining[:chunk_len]
+                    remaining = remaining[chunk_len:]
+                if remaining:
+                    last = runs[-1]
+                    new_run = paragraph.add_run(remaining)
+                    try:
+                        new_run.style = last.style
+                        new_run.bold = last.bold
+                        new_run.italic = last.italic
+                        new_run.underline = last.underline
+                        if last.font is not None:
+                            new_run.font.name = last.font.name
+                            new_run.font.size = last.font.size
+                            if getattr(last.font.color, "rgb", None) is not None:
+                                new_run.font.color.rgb = last.font.color.rgb
+                    except Exception:
+                        pass
+
+            line_idx = 0
+            for para in doc.paragraphs:
+                if line_idx >= len(lines):
+                    break
+                apply_text_to_runs(para, lines[line_idx].rstrip("\r"))
+                line_idx += 1
+
+            # Do not append extra paragraphs to avoid layout changes
+            doc.save(str(output_path))
+            return {
+                "success": True,
+                "file_path": str(output_path),
+                "format": "docx",
+                "size_bytes": output_path.stat().st_size
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Failed to save DOCX (preserve formatting): {e}"}
     
     def get_document_info(self, file_path: Union[str, Path]) -> Dict[str, Any]:
         """Get comprehensive information about a document"""

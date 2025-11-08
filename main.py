@@ -90,8 +90,22 @@ def run_whatsapp_mode(config, agent, whatsapp_handler, logger):
     except KeyboardInterrupt:
         logger.info("WhatsApp mode stopped by user")
 
-def process_document_pipeline(file_path, config, agent, doc_handler, printer_manager, logger):
-    """Core pipeline: Load → AI Edit → Save → Print"""
+def process_document_pipeline(
+    file_path,
+    config,
+    agent,
+    doc_handler,
+    printer_manager,
+    logger,
+    save_dir: str | None = None,
+    review_before_print: bool | None = None,
+    auto_print: bool | None = None,
+    output_format_override: str | None = None,
+):
+    """Core pipeline: Load → AI Edit → Save → optional Print
+
+    Supports custom save directory, conditional printing, and output format override.
+    """
     file_path = Path(file_path)
     timestamp = get_timestamp()
     
@@ -125,12 +139,15 @@ def process_document_pipeline(file_path, config, agent, doc_handler, printer_man
     
     # Step 3: Save processed document
     logger.info("Step 3: Saving processed document...")
-    output_filename = f"processed_{timestamp}_{file_path.stem}.{config.output_format}"
-    
+    output_format = output_format_override or config.output_format
+
+    # Pass the original filename so the handler can decide output naming
+    # and enable formatting preservation when applicable (DOCX input).
     save_result = doc_handler.save_processed_document(
-        improved_text, 
-        output_filename, 
-        config.output_format
+        improved_text,
+        str(file_path),
+        output_format,
+        save_dir=save_dir,
     )
     
     if not save_result["success"]:
@@ -139,16 +156,23 @@ def process_document_pipeline(file_path, config, agent, doc_handler, printer_man
     processed_file_path = save_result["file_path"]
     logger.info(f"Saved processed document: {processed_file_path}")
     
-    # Step 4: Print document
-    logger.info("Step 4: Printing document...")
-    try:
-        print_result = printer_manager.print_document(processed_file_path)
-        if print_result["success"]:
-            logger.info(f"Document printed successfully: {print_result['printer']}")
-        else:
-            logger.warning(f"Printing failed: {print_result['error']}")
-    except Exception as e:
-        logger.warning(f"Printing error (continuing anyway): {e}")
+    # Step 4: Optional printing
+    should_review = review_before_print if review_before_print is not None else config.require_confirmation
+    should_auto_print = auto_print if auto_print is not None else config.auto_print
+    printed = False
+    if should_review:
+        logger.info("Review requested; skipping auto print at pipeline stage.")
+    elif should_auto_print:
+        logger.info("Auto printing enabled; sending to printer...")
+        try:
+            print_result = printer_manager.print_document(processed_file_path)
+            if print_result.get("success"):
+                printed = True
+                logger.info(f"Document printed successfully: {print_result.get('printer')}")
+            else:
+                logger.warning(f"Printing failed: {print_result.get('error')}")
+        except Exception as e:
+            logger.warning(f"Printing error (continuing anyway): {e}")
     
     # Step 5: Log summary
     logger.info("Step 5: Logging summary...")
@@ -159,7 +183,8 @@ def process_document_pipeline(file_path, config, agent, doc_handler, printer_man
         "changes_summary": changes_summary,
         "original_length": len(original_text),
         "processed_length": len(improved_text),
-        "model_used": ai_result.get("model_used", "unknown")
+        "model_used": ai_result.get("model_used", "unknown"),
+        "printed": printed,
     }
     
     # Save processing log
@@ -169,6 +194,7 @@ def process_document_pipeline(file_path, config, agent, doc_handler, printer_man
         json.dump(summary, f, indent=2, ensure_ascii=False)
     
     logger.info(f"Pipeline completed successfully! Log saved: {log_file}")
+    return summary
 
 def main():
     """Main application entry point"""
